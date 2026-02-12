@@ -5,6 +5,9 @@ cluster using [pixi](https://pixi.sh). All dependencies (including system librar
 PROJ, GDAL, HDF5, and NetCDF) are fully isolated and managed by pixi — nothing is
 installed into the system Python or shared libraries.
 
+**Important:** The install directory must be on the **shared filesystem** (e.g., NFS) so
+that compute nodes can access it when jobs are submitted via Slurm.
+
 ## Prerequisites
 
 Install pixi on the cluster if it's not already available:
@@ -21,10 +24,11 @@ into a directory that is in the `PATH`.
 
 ### 1. Create the project directory
 
+The directory **must** be on the shared filesystem visible to all compute nodes:
+
 ```bash
-sudo mkdir -p /opt/coastal-calibration
-sudo chown $(whoami) /opt/coastal-calibration
-cd /opt/coastal-calibration
+mkdir -p /ngen-test/coastal-calibration
+cd /ngen-test/coastal-calibration
 ```
 
 ### 2. Create `pixi.toml`
@@ -54,17 +58,17 @@ EOF
 pixi install
 ```
 
-This creates a fully isolated environment under `/opt/coastal-calibration/.pixi/` with
-all conda and PyPI dependencies resolved together.
+This creates a fully isolated environment under `/ngen-test/coastal-calibration/.pixi/`
+with all conda and PyPI dependencies resolved together.
 
 ### 4. Create a wrapper script
 
 ```bash
-cat > /opt/coastal-calibration/coastal-calibration <<'WRAPPER'
+cat > /ngen-test/coastal-calibration/coastal-calibration <<'WRAPPER'
 #!/bin/sh
-exec /opt/coastal-calibration/.pixi/envs/default/bin/coastal-calibration "$@"
+exec /ngen-test/coastal-calibration/.pixi/envs/default/bin/coastal-calibration "$@"
 WRAPPER
-chmod +x /opt/coastal-calibration/coastal-calibration
+chmod +x /ngen-test/coastal-calibration/coastal-calibration
 ```
 
 ### 5. Make it available to all users
@@ -72,13 +76,13 @@ chmod +x /opt/coastal-calibration/coastal-calibration
 Symlink into a shared bin directory:
 
 ```bash
-sudo ln -sf /opt/coastal-calibration/coastal-calibration /usr/local/bin/coastal-calibration
+sudo ln -sf /ngen-test/coastal-calibration/coastal-calibration /usr/local/bin/coastal-calibration
 ```
 
 ## Updating (when a new version is pushed)
 
 ```bash
-cd /opt/coastal-calibration
+cd /ngen-test/coastal-calibration
 pixi update
 ```
 
@@ -94,18 +98,20 @@ coastal-calibration --help
 ## Uninstalling
 
 ```bash
-sudo rm -rf /opt/coastal-calibration
+rm -rf /ngen-test/coastal-calibration
 sudo rm -f /usr/local/bin/coastal-calibration
 ```
 
 ## How it works
 
-- **pixi** manages an isolated environment in `/opt/coastal-calibration/.pixi/`
+- **pixi** manages an isolated environment in `/ngen-test/coastal-calibration/.pixi/`
 - **conda-forge** provides system libraries (`proj`, `gdal`, `hdf5`, `netcdf`) that
     would otherwise require `module load` or system package managers
 - **PyPI** provides the Python package (`coastal-calibration`) and its Python
     dependencies, installed from the Git repository
 - The wrapper script calls the binary directly from the isolated environment, so users
     don't need pixi installed or any knowledge of the environment
+- The install lives on the shared filesystem (`/ngen-test`) so all compute nodes can
+    access it when running Slurm jobs
 - Nothing is installed into the system Python — the cluster's existing software is
     completely unaffected

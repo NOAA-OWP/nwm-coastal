@@ -25,7 +25,7 @@ def _raise_cli_error(message: str) -> None:
 
 
 @click.group()
-@click.version_option()
+@click.version_option(package_name="coastal-calibration")
 def cli() -> None:
     """Coastal calibration workflow manager (SCHISM, SFINCS)."""
 
@@ -255,7 +255,7 @@ slurm:
 
 simulation:
   start_date: {start_date_str}
-  duration_hours: 3
+  duration_hours: 12
   coastal_domain: {domain}
   meteo_source: {meteo_source}
 
@@ -286,7 +286,7 @@ slurm:
 
 simulation:
   start_date: {start_date_str}
-  duration_hours: 3
+  duration_hours: 12
   coastal_domain: {domain}
   meteo_source: {meteo_source}
 
