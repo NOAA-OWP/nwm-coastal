@@ -25,7 +25,7 @@ model_config:
 EOF
 
 # For production only this line is needed
-coastal-calibration run "${CONFIG_FILE}"
+/ngen-test/coastal-calibration/coastal-calibration run "${CONFIG_FILE}"
 
 # For running the dev version we use pixi.
 # For production comment out these three lines.
