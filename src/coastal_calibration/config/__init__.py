@@ -8,13 +8,15 @@ from coastal_calibration.config.schema import (
     CoastalCalibConfig,
     CoastalDomain,
     DownloadConfig,
+    ModelConfig,
+    ModelType,
     MonitoringConfig,
-    MPIConfig,
     PathConfig,
+    SchismModelConfig,
+    SfincsModelConfig,
     SimulationConfig,
     SlurmConfig,
 )
-from coastal_calibration.config.sfincs_schema import SfincsConfig
 
 __all__ = [
     "BoundaryConfig",
@@ -22,10 +24,12 @@ __all__ = [
     "CoastalCalibConfig",
     "CoastalDomain",
     "DownloadConfig",
-    "MPIConfig",
+    "ModelConfig",
+    "ModelType",
     "MonitoringConfig",
     "PathConfig",
-    "SfincsConfig",
+    "SchismModelConfig",
+    "SfincsModelConfig",
     "SimulationConfig",
     "SlurmConfig",
 ]

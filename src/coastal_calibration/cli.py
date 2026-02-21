@@ -6,7 +6,7 @@ from pathlib import Path
 
 import rich_click as click
 
-from coastal_calibration.config.schema import CoastalCalibConfig, CoastalDomain
+from coastal_calibration.config.schema import CoastalCalibConfig, CoastalDomain, ModelType
 from coastal_calibration.runner import CoastalCalibRunner
 from coastal_calibration.utils.logging import configure_logger, logger
 
@@ -25,7 +25,7 @@ def _raise_cli_error(message: str) -> None:
 
 
 @click.group()
-@click.version_option()
+@click.version_option(package_name="coastal_calibration")
 def cli() -> None:
     """Coastal calibration workflow manager (SCHISM, SFINCS)."""
 
@@ -62,6 +62,7 @@ def run(
     try:
         cfg = CoastalCalibConfig.from_yaml(config_path)
         runner = CoastalCalibRunner(cfg)
+        configure_logger(level="INFO")
 
         if dry_run:
             logger.info("Dry run mode - validating configuration...")
@@ -93,14 +94,30 @@ def run(
     is_flag=True,
     help="Wait for job completion and show status updates.",
 )
-def submit(config: Path, interactive: bool) -> None:
+@click.option(
+    "--start-from",
+    type=str,
+    help="Stage to start from (skip earlier stages).",
+)
+@click.option(
+    "--stop-after",
+    type=str,
+    help="Stage to stop after (skip later stages).",
+)
+def submit(
+    config: Path,
+    interactive: bool,
+    start_from: str | None,
+    stop_after: str | None,
+) -> None:
     """Submit workflow as a SLURM job.
 
     CONFIG is the path to a YAML configuration file.
 
     By default, submits the job and returns immediately after submission.
     Use --interactive to wait and monitor the job until completion.
-    The download step always runs on the login node before submission.
+    Python-only stages run on the login node; container stages are
+    submitted as a SLURM job.
     """
     config_path = config.resolve()
 
@@ -108,10 +125,14 @@ def submit(config: Path, interactive: bool) -> None:
         cfg = CoastalCalibConfig.from_yaml(config_path)
         cfg.paths.work_dir.mkdir(parents=True, exist_ok=True)
 
-        configure_logger(level="INFO")
-
         runner = CoastalCalibRunner(cfg)
-        result = runner.submit(wait=interactive, log_file=None)
+        configure_logger(level="INFO")
+        result = runner.submit(
+            wait=interactive,
+            log_file=None,
+            start_from=start_from,
+            stop_after=stop_after,
+        )
 
         if result.success:
             if interactive:
@@ -182,7 +203,13 @@ def validate(config: Path) -> None:
     is_flag=True,
     help="Overwrite existing file without prompting.",
 )
-def init(output: Path, domain: CoastalDomain, force: bool) -> None:
+@click.option(
+    "--model",
+    type=click.Choice(["schism", "sfincs"]),
+    default="schism",
+    help="Model type (default: schism).",
+)
+def init(output: Path, domain: CoastalDomain, force: bool, model: ModelType) -> None:
     """Create a minimal configuration file.
 
     OUTPUT is the path where the configuration will be written.
@@ -207,7 +234,39 @@ def init(output: Path, domain: CoastalDomain, force: bool) -> None:
     start_date_str = start_date.strftime("%Y-%m-%d")
     username = os.environ.get("USER", "YOUR_USERNAME")
 
-    config_content = f"""\
+    if model == "sfincs":
+        config_content = f"""\
+# Minimal SFINCS configuration for {domain} domain
+#
+# Paths are auto-generated based on user, domain, and source:
+#   work_dir: /ngen-test/coastal/${{slurm.user}}/sfincs_${{simulation.coastal_domain}}_${{boundary.source}}_${{simulation.meteo_source}}/sfincs_${{simulation.start_date}}
+#   raw_download_dir: /ngen-test/coastal/${{slurm.user}}/sfincs_${{simulation.coastal_domain}}_${{boundary.source}}_${{simulation.meteo_source}}/raw_data
+#
+# Usage:
+#   coastal-calibration validate {output_path.name}
+#   coastal-calibration submit {output_path.name}
+#   coastal-calibration submit {output_path.name} -i  # wait for completion
+
+model: sfincs
+
+slurm:
+  job_name: coastal_calibration
+  user: {username}
+
+simulation:
+  start_date: {start_date_str}
+  duration_hours: 12
+  coastal_domain: {domain}
+  meteo_source: {meteo_source}
+
+boundary:
+  source: {boundary_source}
+
+model_config:
+  prebuilt_dir: /path/to/prebuilt/sfincs/model
+"""
+    else:
+        config_content = f"""\
 # Minimal SCHISM configuration for {domain} domain
 #
 # Paths are auto-generated based on user, domain, and source:
@@ -219,18 +278,23 @@ def init(output: Path, domain: CoastalDomain, force: bool) -> None:
 #   coastal-calibration submit {output_path.name}
 #   coastal-calibration submit {output_path.name} -i  # wait for completion
 
+model: schism
+
 slurm:
   job_name: coastal_calibration
   user: {username}
 
 simulation:
   start_date: {start_date_str}
-  duration_hours: 3
+  duration_hours: 12
   coastal_domain: {domain}
   meteo_source: {meteo_source}
 
 boundary:
   source: {boundary_source}
+
+model_config:
+  include_noaa_gages: true
 """
 
     output_path.write_text(config_content)
@@ -238,23 +302,58 @@ boundary:
 
 
 @cli.command()
-def stages() -> None:
+@click.option(
+    "--model",
+    type=click.Choice(["schism", "sfincs"]),
+    default=None,
+    help="Show stages for a specific model (default: show all).",
+)
+def stages(model: str | None) -> None:
     """List available workflow stages."""
-    stage_list = [
+    schism_stages = [
         ("download", "Download NWM/STOFS data (optional)"),
         ("pre_forcing", "Prepare NWM forcing data"),
         ("nwm_forcing", "Generate atmospheric forcing (MPI)"),
         ("post_forcing", "Post-process forcing data"),
+        ("schism_obs", "Add NOAA observation stations"),
         ("update_params", "Create SCHISM param.nml"),
         ("boundary_conditions", "Generate boundary conditions (TPXO/STOFS)"),
         ("pre_schism", "Prepare SCHISM inputs"),
         ("schism_run", "Run SCHISM model (MPI)"),
         ("post_schism", "Post-process SCHISM outputs"),
+        ("schism_plot", "Plot simulated vs observed water levels"),
     ]
 
-    click.echo("Workflow stages:")
-    for i, (name, desc) in enumerate(stage_list, 1):
-        click.echo(f"  {i}. {name}: {desc}")
+    sfincs_stages = [
+        ("download", "Download NWM/STOFS data (optional)"),
+        ("sfincs_symlinks", "Create .nc symlinks for NWM data"),
+        ("sfincs_data_catalog", "Generate HydroMT data catalog"),
+        ("sfincs_init", "Initialise SFINCS model (pre-built)"),
+        ("sfincs_timing", "Set SFINCS timing"),
+        ("sfincs_forcing", "Add water level forcing"),
+        ("sfincs_obs", "Add observation points"),
+        ("sfincs_discharge", "Add discharge sources"),
+        ("sfincs_precip", "Add precipitation forcing"),
+        ("sfincs_wind", "Add wind forcing"),
+        ("sfincs_pressure", "Add atmospheric pressure forcing"),
+        ("sfincs_write", "Write SFINCS model"),
+        ("sfincs_run", "Run SFINCS model (Singularity)"),
+        ("sfincs_plot", "Plot simulated vs observed water levels"),
+    ]
+
+    def _print_stages(title: str, stage_list: list[tuple[str, str]]) -> None:
+        click.echo(f"{title}:")
+        for i, (name, desc) in enumerate(stage_list, 1):
+            click.echo(f"  {i}. {name}: {desc}")
+
+    if model == "schism":
+        _print_stages("SCHISM workflow stages", schism_stages)
+    elif model == "sfincs":
+        _print_stages("SFINCS workflow stages", sfincs_stages)
+    else:
+        _print_stages("SCHISM workflow stages", schism_stages)
+        click.echo()
+        _print_stages("SFINCS workflow stages", sfincs_stages)
 
 
 def main() -> None:

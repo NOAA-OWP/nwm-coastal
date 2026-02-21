@@ -78,7 +78,7 @@ DATA_SOURCE_DATE_RANGES: dict[str, dict[str, DateRange]] = {
             description="NWM Retrospective 3.0 (Alaska)",
         ),
         "hawaii": DateRange(
-            start=datetime(1994, 1, 1),
+            start=datetime(1994, 1, 2),
             end=datetime(2013, 12, 31),
             description="NWM Retrospective 3.0 (Hawaii)",
         ),
@@ -234,13 +234,22 @@ def get_default_sources(
     ValueError
         If no valid source combination exists for the domain.
     """
-    # Preferred combinations in priority order
-    combos: list[tuple[MeteoSource, BoundarySource]] = [
-        ("nwm_retro", "stofs"),
-        ("nwm_ana", "stofs"),
-        ("nwm_retro", "tpxo"),
-        ("nwm_ana", "tpxo"),
-    ]
+    # Preferred combinations in priority order.
+    # PRVI uses nwm_ana first because SCHISM currently fails with nwm_retro.
+    if domain == "prvi":
+        combos: list[tuple[MeteoSource, BoundarySource]] = [
+            ("nwm_ana", "stofs"),
+            ("nwm_ana", "tpxo"),
+            ("nwm_retro", "stofs"),
+            ("nwm_retro", "tpxo"),
+        ]
+    else:
+        combos: list[tuple[MeteoSource, BoundarySource]] = [
+            ("nwm_retro", "stofs"),
+            ("nwm_ana", "stofs"),
+            ("nwm_retro", "tpxo"),
+            ("nwm_ana", "tpxo"),
+        ]
 
     for meteo, coastal in combos:
         overlap = get_overlapping_range(meteo, coastal, domain)
@@ -372,7 +381,16 @@ def _build_nwm_ana_forcing_urls(
     output_dir: Path,
     domain: str,
 ) -> tuple[list[str], list[Path]]:
-    """Build URLs for NWM Analysis forcing files from GCS."""
+    """Build URLs for NWM Analysis forcing files from GCS.
+
+    Files are saved locally as ``YYYYMMDDHH.LDASIN_DOMAIN1`` (using the
+    *simulation* timestamp ``dt``, not the lagged fetch timestamp) so that:
+
+    1. Multi-day simulations do not overwrite files from different dates
+       (the remote filename only contains the hour, not the date).
+    2. The ``pre_forcing`` stage can create symlinks with the same
+       convention used by ``nwm_retro``, simplifying downstream code.
+    """
     base_url = "https://storage.googleapis.com/national-water-model"
     suffix, name = _DOMAIN_MAP_ANA.get(domain, ("", "conus"))
 
@@ -386,13 +404,12 @@ def _build_nwm_ana_forcing_urls(
         date_str = fetch_dt.strftime("%Y%m%d")
         hour_str = f"{fetch_dt.hour:02d}"
 
-        url = (
-            f"{base_url}/nwm.{date_str}/"
-            f"forcing_analysis_assim{suffix}/"
-            f"nwm.t{hour_str}z.analysis_assim.forcing.tm02.{name}.nc"
-        )
+        remote_name = f"nwm.t{hour_str}z.analysis_assim.forcing.tm02.{name}.nc"
+        url = f"{base_url}/nwm.{date_str}/forcing_analysis_assim{suffix}/{remote_name}"
         urls.append(url)
-        paths.append(out_dir / f"{dt.strftime('%Y%m%d%H')}.LDASIN_DOMAIN1")
+        # Save with simulation-hour timestamp to avoid overwrites across days.
+        local_name = f"{dt.strftime('%Y%m%d%H')}.LDASIN_DOMAIN1"
+        paths.append(out_dir / local_name)
 
     return urls, paths
 
@@ -539,53 +556,14 @@ def _build_glofs_urls(
     return urls, paths
 
 
-def _filter_existing(
-    urls: list[str],
-    file_paths: list[Path],
-) -> tuple[list[str], list[Path], int]:
-    """Separate already-downloaded files from those still needed.
-
-    Returns (pending_urls, pending_paths, already_exist_count).
-    """
-    pending_urls: list[str] = []
-    pending_paths: list[Path] = []
-    existing = 0
-    for url, path in zip(urls, file_paths, strict=False):
-        if path.exists() and path.stat().st_size > 0:
-            existing += 1
-        else:
-            pending_urls.append(url)
-            pending_paths.append(path)
-    return pending_urls, pending_paths, existing
-
-
-def _tally_results(
-    result: DownloadResult,
-    pending_urls: list[str],
-    pending_paths: list[Path],
-) -> None:
-    """Count successful/failed downloads and clean up empty files."""
-    for url, path in zip(pending_urls, pending_paths, strict=False):
-        if path.exists() and path.stat().st_size > 0:
-            result.successful += 1
-        else:
-            result.failed += 1
-            if not result.errors:
-                result.errors.append(f"Failed to download: {url}")
-            if path.exists():
-                path.unlink()
-
-
 def _execute_download(
     urls: list[str],
     file_paths: list[Path],
     source_name: str,
     timeout: int,
     raise_on_error: bool,
-    *,
-    skip_existing: bool = False,
 ) -> DownloadResult:
-    """Execute download using tiny_retriever."""
+    """Download all *urls* to *file_paths* using tiny_retriever."""
     if not urls:
         return DownloadResult(source=source_name)
 
@@ -595,25 +573,29 @@ def _execute_download(
         file_paths=list(file_paths),
     )
 
-    if skip_existing:
-        pending_urls, pending_paths, existing = _filter_existing(urls, file_paths)
-        result.successful += existing
-    else:
-        pending_urls = urls
-        pending_paths = list(file_paths)
-
-    if not pending_urls:
-        return result
-
-    for path in pending_paths:
+    for path in file_paths:
         path.parent.mkdir(parents=True, exist_ok=True)
 
+    # 8 mb chunk size is reasonable for large files like STOFS (~12 GB)
+    # while not causing too much overhead for smaller files.
+    chunk_size = 8 * 1024 * 1024
     try:
-        download(pending_urls, pending_paths, timeout=timeout, raise_status=raise_on_error)
+        download(
+            urls, file_paths, timeout=timeout, raise_status=raise_on_error, chunk_size=chunk_size
+        )
     except Exception as e:
         result.errors.append(str(e))
 
-    _tally_results(result, pending_urls, pending_paths)
+    for url, path in zip(urls, file_paths, strict=False):
+        if not path.exists() or path.stat().st_size == 0:
+            result.failed += 1
+            if not result.errors:
+                result.errors.append(f"Failed to download: {url}")
+            if path.exists():
+                path.unlink()
+        else:
+            result.successful += 1
+
     return result
 
 
@@ -686,7 +668,6 @@ def download_data(
     tpxo_local_path: Path | str | None = None,
     timeout: int = 600,
     raise_on_error: bool = False,
-    skip_existing: bool = False,
 ) -> DownloadResults:
     """Download meteorological, hydrological, and coastal data.
 
@@ -722,9 +703,6 @@ def download_data(
     raise_on_error : bool, optional
         Whether to raise exceptions on download failures.
         Defaults to ``False``.
-    skip_existing : bool, optional
-        Skip files that already exist on disk.
-        Defaults to ``False``.
 
     Returns
     -------
@@ -755,9 +733,7 @@ def download_data(
         urls, paths = _build_nwm_retro_forcing_urls(start, end, out_dir, domain)
     else:
         urls, paths = _build_nwm_ana_forcing_urls(start, end, out_dir, domain)
-    meteo_result = _execute_download(
-        urls, paths, f"meteo/{meteo_source}", timeout, raise_on_error, skip_existing=skip_existing
-    )
+    meteo_result = _execute_download(urls, paths, f"meteo/{meteo_source}", timeout, raise_on_error)
 
     if hydro_source == "ngen":
         hydro_result = DownloadResult(
@@ -767,22 +743,12 @@ def download_data(
     elif meteo_source == "nwm_retro":
         urls, paths = _build_nwm_retro_streamflow_urls(start, end, out_dir, domain)
         hydro_result = _execute_download(
-            urls,
-            paths,
-            f"hydro/{hydro_source}",
-            timeout,
-            raise_on_error,
-            skip_existing=skip_existing,
+            urls, paths, f"hydro/{hydro_source}", timeout, raise_on_error
         )
     else:
         urls, paths = _build_nwm_ana_streamflow_urls(start, end, out_dir, domain)
         hydro_result = _execute_download(
-            urls,
-            paths,
-            f"hydro/{hydro_source}",
-            timeout,
-            raise_on_error,
-            skip_existing=skip_existing,
+            urls, paths, f"hydro/{hydro_source}", timeout, raise_on_error
         )
 
     if coastal_source == "tpxo":
@@ -809,14 +775,14 @@ def download_data(
             )
     elif coastal_source == "stofs":
         urls, paths = _build_stofs_urls(start, out_dir)
+        # STOFS fields file is ~12 GB -- give it a generous timeout.
+        stofs_timeout = max(timeout, 3600)
         coastal_result = _execute_download(
-            urls, paths, "coastal/stofs", timeout, raise_on_error, skip_existing=skip_existing
+            urls, paths, "coastal/stofs", stofs_timeout, raise_on_error
         )
     else:
         urls, paths = _build_glofs_urls(start, end, out_dir, glofs_model)
-        coastal_result = _execute_download(
-            urls, paths, "coastal/glofs", timeout, raise_on_error, skip_existing=skip_existing
-        )
+        coastal_result = _execute_download(urls, paths, "coastal/glofs", timeout, raise_on_error)
 
     results = DownloadResults(meteo=meteo_result, hydro=hydro_result, coastal=coastal_result)
     _log_summary(results)

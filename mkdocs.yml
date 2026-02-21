@@ -1,7 +1,7 @@
 site_name: NWM Coastal
 site_description: Coastal model (SCHISM, SFINCS) workflow on HPC clusters
 site_author: Taher Chegini
-site_url: https://ngwpc.github.io/nwm-coastal
+site_url: https://NGWPC.github.io/nwm-coastal
 
 repo_name: NGWPC/nwm-coastal
 repo_url: https://github.com/NGWPC/nwm-coastal
@@ -66,6 +66,9 @@ hooks:
 
 plugins:
 - search
+- mike:
+    alias_type: symlink
+    canonical_version: latest
 - mkdocstrings:
     default_handler: python
     handlers:
@@ -129,6 +132,8 @@ markdown_extensions:
 - pymdownx.tilde
 
 extra:
+  version:
+    provider: mike
   social:
   - icon: fontawesome/brands/github
     link: https://github.com/NGWPC/nwm-coastal

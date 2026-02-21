@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.resources
 import os
 import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,7 @@ class WorkflowStage(ABC):
 
     name: str = "base"
     description: str = "Base workflow stage"
+    requires_container: bool = False
 
     def __init__(
         self,
@@ -65,15 +67,6 @@ class WorkflowStage(ABC):
         forcing_end_dt = start_dt + timedelta(hours=length_hrs)
         env["FORCING_END_DATE"] = forcing_end_dt.strftime("%Y%m%d%H00")
 
-        if length_hrs <= 0:
-            schism_begin_dt = start_dt + timedelta(hours=length_hrs)
-            env["SCHISM_BEGIN_DATE"] = schism_begin_dt.strftime("%Y%m%d%H00")
-            env["SCHISM_END_DATE"] = f"{pdycyc}00"
-        else:
-            env["SCHISM_BEGIN_DATE"] = f"{pdycyc}00"
-            schism_end_dt = start_dt + timedelta(hours=length_hrs)
-            env["SCHISM_END_DATE"] = schism_end_dt.strftime("%Y%m%d%H00")
-
         env["END_DATETIME"] = forcing_end_dt.strftime("%Y%m%d%H")
 
         env["PDY"] = pdy
@@ -84,13 +77,23 @@ class WorkflowStage(ABC):
         env["FORCING_START_HOUR"] = cyc
 
     def build_environment(self) -> dict[str, str]:
-        """Build environment variables for the stage."""
+        """Build environment variables for the stage.
+
+        Shared variables are set here.  Model-specific variables (compute
+        resources, mesh paths, etc.) are added by the concrete
+        :class:`~coastal_calibration.config.schema.ModelConfig` via its
+        :meth:`build_environment` method.
+        """
         sim = self.config.simulation
         paths = self.config.paths
-        mpi = self.config.mpi
-        slurm = self.config.slurm
 
         env = os.environ.copy()
+
+        # HDF5 file locking (fcntl) is unreliable on NFS-mounted
+        # filesystems and causes PermissionError when netCDF4/HDF5
+        # tries to create files.  Disable it unless the user has
+        # already set the variable.
+        env.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
         env["STARTPDY"] = sim.start_pdy
         env["STARTCYC"] = sim.start_cyc
@@ -107,7 +110,7 @@ class WorkflowStage(ABC):
         env["COASTAL_WORK_DIR"] = str(paths.work_dir)
         env["DATAexec"] = str(paths.work_dir)
         env["NFS_MOUNT"] = str(paths.nfs_mount)
-        env["NGEN_APP_DIR"] = str(paths.ngen_app_dir)
+        env["NWM_DIR"] = str(paths.nwm_dir)
         env["OTPSDIR"] = str(paths.otps_dir)
         env["CONDA_ENV_NAME"] = paths.conda_env_name
 
@@ -116,18 +119,21 @@ class WorkflowStage(ABC):
         env["PARMnwm"] = str(paths.parm_nwm)
         env["EXECnwm"] = str(paths.exec_nwm)
 
-        env["NODES"] = str(slurm.nodes)
-        env["NCORES"] = str(slurm.ntasks_per_node)
-        env["NPROCS"] = str(slurm.total_tasks)
-        env["NSCRIBES"] = str(mpi.nscribes)
-        env["OMP_NUM_THREADS"] = str(mpi.omp_num_threads)
-
         env["CONDA_ENVS_PATH"] = str(paths.conda_envs_path)
 
-        env["INLAND_DOMAIN"] = sim.inland_domain
-        env["NWM_DOMAIN"] = sim.nwm_domain
-        env["GEO_GRID"] = sim.geo_grid
-        env["SCHISM_ESMFMESH"] = str(paths.schism_mesh(sim))
+        # Prepend the conda environment's bin directory and the base
+        # conda bin directory to PATH so that ``mpiexec`` and other
+        # conda-provided tools are found.  Also add the conda lib
+        # directory to LD_LIBRARY_PATH for MPI shared libraries.
+        # This mirrors the environment set up by the generated submit
+        # scripts (runner.py lines 765-766).
+        conda_bin = f"{paths.conda_envs_path}/{paths.conda_env_name}/bin"
+        conda_base_bin = f"{paths.nfs_mount}/ngen-app/conda/bin"
+        conda_lib = f"{paths.nfs_mount}/ngen-app/conda/lib"
+        conda_envs_lib = f"{paths.conda_envs_path}/lib"
+        env["PATH"] = f"{conda_bin}:{conda_base_bin}:{env.get('PATH', '')}"
+        env["LD_LIBRARY_PATH"] = f"{conda_lib}:{conda_envs_lib}:{env.get('LD_LIBRARY_PATH', '')}"
+
         env["GEOGRID_FILE"] = str(paths.geogrid_file(sim))
 
         env["NWM_FORCING_DIR"] = str(paths.meteo_dir(sim.meteo_source))
@@ -143,6 +149,9 @@ class WorkflowStage(ABC):
 
         # Add paths to bundled scripts so bash scripts can find them
         env.update(get_script_environment_vars())
+
+        # Delegate model-specific variables (compute resources, mesh, etc.)
+        self.config.model_config.build_environment(env, self.config)
 
         self._env = env
         return env
@@ -209,6 +218,7 @@ class WorkflowStage(ABC):
     def run_singularity_command(
         self,
         command: list[str],
+        sif_path: Path | str,
         bindings: list[str] | None = None,
         pwd: Path | None = None,
         env: dict[str, str] | None = None,
@@ -217,15 +227,19 @@ class WorkflowStage(ABC):
     ) -> subprocess.CompletedProcess[str]:
         """Run a command inside the Singularity container.
 
-        Environment variables are passed to the container using the
-        SINGULARITYENV_ prefix, which ensures they are available inside
-        the container regardless of Singularity's default environment
-        handling.
+        Parameters
+        ----------
+        sif_path : Path or str
+            Path to the Singularity SIF image.
+
+        Environment variables are inherited by the container through
+        Singularity's default pass-through behaviour (the host
+        environment is visible inside the container).
         """
         if env is None:
             env = self.build_environment()
 
-        sif_path = str(self.config.paths.singularity_image)
+        sif_path = str(sif_path)
 
         if bindings is None:
             bindings = self._get_default_bindings()
@@ -233,47 +247,62 @@ class WorkflowStage(ABC):
         bind_str = ",".join(bindings)
 
         if pwd is None:
-            pwd = self.config.paths.ngen_app_dir / "ngen-forcing" / "coastal" / "calib"
+            from coastal_calibration.config.schema import DEFAULT_CONTAINER_PWD
+
+            pwd = DEFAULT_CONTAINER_PWD
 
         sing_cmd = ["singularity", "exec", "-B", bind_str, "--pwd", str(pwd), sif_path]
         sing_cmd.extend(command)
 
         if use_mpi:
-            tasks = mpi_tasks or self.config.slurm.total_tasks
-            mpi_cmd = ["mpiexec", "-n", str(tasks)]
-            if self.config.mpi.oversubscribe:
+            if mpi_tasks is None:
+                msg = "mpi_tasks must be specified when use_mpi=True"
+                raise ValueError(msg)
+
+            # Always use mpiexec from the conda environment (added to
+            # PATH by build_environment).  ``srun`` hangs when wrapping
+            # ``singularity exec`` because SLURM's PMI bootstrap cannot
+            # reach the containerised MPI processes.
+            mpi_cmd = ["mpiexec", "-n", str(mpi_tasks)]
+            oversubscribe = getattr(self.config.model_config, "oversubscribe", False)
+            if oversubscribe:
                 mpi_cmd.append("--oversubscribe")
             sing_cmd = [*mpi_cmd, *sing_cmd]
 
         self._log(f"Running Singularity command: {' '.join(command[:3])}...")
 
-        # Singularity passes environment variables that are prefixed with
-        # SINGULARITYENV_ to the container. We need to add this prefix to
-        # all our workflow environment variables so they're available inside.
-        # Some variables cannot be overridden (HOME, USER, etc.) and some
-        # variable names from the host environment may be invalid.
-        singularity_protected = {"HOME", "USER", "SHELL", "TERM", "PATH", "LD_LIBRARY_PATH"}
-        singularity_env = env.copy()
-        for key, value in env.items():
-            # Skip protected variables that Singularity won't allow overriding
-            if key in singularity_protected:
-                continue
-            # Skip variables with invalid names (must be alphanumeric + underscore)
-            if not key.replace("_", "").isalnum():
-                continue
-            singularity_env[f"SINGULARITYENV_{key}"] = value
-
-        result = subprocess.run(
-            sing_cmd,
-            env=singularity_env,
-            capture_output=True,
-            text=True,
-            check=False,
+        # Redirect both stdout and stderr to files instead of pipes.
+        # MPI launches (mpiexec → singularity) create a deep process
+        # tree where intermediate processes can inherit pipe fds.
+        # Writing to a file avoids pipe-buffer deadlocks and matches
+        # how the generated submit scripts handle output.
+        fd, stderr_name = tempfile.mkstemp(
+            prefix="singularity_",
+            suffix=".stderr",
+            dir=self.config.paths.work_dir,
         )
+        stderr_path = Path(stderr_name)
+        try:
+            with os.fdopen(fd, "w") as stderr_file:
+                proc = subprocess.Popen(
+                    sing_cmd,
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                )
+                proc.wait()
+            stderr = stderr_path.read_text(errors="replace")
+            stderr_path.unlink(missing_ok=True)
+        except BaseException:
+            stderr_path.unlink(missing_ok=True)
+            raise
+
+        result = subprocess.CompletedProcess(sing_cmd, proc.returncode, stdout="", stderr=stderr)
 
         if result.returncode != 0:
-            self._log(f"Singularity command failed: {result.stderr[-2000:]}", "error")
-            raise RuntimeError(f"Singularity command failed: {result.stderr}")
+            stderr = result.stderr or ""
+            self._log(f"Singularity command failed: {stderr[-2000:]}", "error")
+            raise RuntimeError(f"Singularity command failed: {stderr}")
 
         return result
 

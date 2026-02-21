@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -ex
+
 #--------------------------------------------------------------
 #This task creates the initial coastal discharge using CHRT files found in:
 #
@@ -74,8 +76,10 @@ nwm_coastal_initial_discharge() {
    last_epoch=$((base_epoch + totalcount * 3600))
    pdycyc=$(date -d "@${last_epoch}" +%Y%m%d%H)
    if [[ ${nwm_cycle} =~ "hawaii" ]]; then
-         _file=${pdycyc}'00.CHRTOUT_DOMAIN1'
-	 ln -sf ${nwm_retro_dir}/${_file} ${WRF_HYDRO_ROOT}/${pdycyc}'00.CHRTOUT_DOMAIN1'
+         for j in 00 15 30 45; do
+           _file=${pdycyc}${j}'.CHRTOUT_DOMAIN1'
+           ln -sf ${nwm_retro_dir}/${_file} ${WRF_HYDRO_ROOT}/${pdycyc}${j}'.CHRTOUT_DOMAIN1'
+         done
    else
          _file=${pdycyc}'00.CHRTOUT_DOMAIN1'
 	 ln -sf ${nwm_retro_dir}/${_file} ${WRF_HYDRO_ROOT}/${pdycyc}'00.CHRTOUT_DOMAIN1'

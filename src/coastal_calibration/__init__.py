@@ -1,20 +1,8 @@
-"""Coastal Calibration Workflow Python API.
-
-This package provides a Python interface for running coastal model calibration
-workflows (SCHISM, SFINCS) using Singularity containers on SLURM-managed HPC clusters.
-
-Example usage:
-    from coastal_calibration import CoastalCalibConfig, CoastalCalibRunner
-
-    config = CoastalCalibConfig.from_yaml("config.yaml")
-    runner = CoastalCalibRunner(config)
-    result = runner.submit()
-
-    if result.success:
-        print(f"Workflow completed in {result.duration_seconds:.1f}s")
-"""
+"""Coastal Calibration Workflow Python API."""
 
 from __future__ import annotations
+
+from importlib.metadata import PackageNotFoundError, version
 
 from coastal_calibration.config.schema import (
     BoundaryConfig,
@@ -23,13 +11,15 @@ from coastal_calibration.config.schema import (
     CoastalDomain,
     DownloadConfig,
     MeteoSource,
+    ModelConfig,
+    ModelType,
     MonitoringConfig,
-    MPIConfig,
     PathConfig,
+    SchismModelConfig,
+    SfincsModelConfig,
     SimulationConfig,
     SlurmConfig,
 )
-from coastal_calibration.config.sfincs_schema import SfincsConfig
 from coastal_calibration.downloader import (
     DATA_SOURCE_DATE_RANGES,
     CoastalSource,
@@ -50,11 +40,6 @@ from coastal_calibration.runner import (
     run_workflow,
     submit_workflow,
 )
-from coastal_calibration.sfincs_runner import (
-    SfincsRunner,
-    build_sfincs,
-    run_sfincs_workflow,
-)
 from coastal_calibration.stages.sfincs import (
     CatalogEntry,
     CatalogMetadata,
@@ -71,7 +56,10 @@ from coastal_calibration.utils.workflow import (
     pre_nwm_forcing_coastal,
 )
 
-__version__ = "0.1.0"
+try:
+    __version__ = version("coastal_calibration")
+except PackageNotFoundError:
+    __version__ = "999"
 
 __all__ = [
     "DATA_SOURCE_DATE_RANGES",
@@ -94,17 +82,17 @@ __all__ = [
     "DownloadResults",
     "GLOFSModel",
     "HydroSource",
-    "MPIConfig",
     "MeteoSource",
+    "ModelConfig",
+    "ModelType",
     "MonitoringConfig",
     "PathConfig",
-    "SfincsConfig",
-    # SFINCS Runner
-    "SfincsRunner",
+    "SchismModelConfig",
+    "SfincsModelConfig",
     "SimulationConfig",
     "SlurmConfig",
     "WorkflowResult",
-    "build_sfincs",
+    "__version__",
     # Data Catalog (SFINCS)
     "create_nc_symlinks",
     # Downloader
@@ -119,7 +107,6 @@ __all__ = [
     "post_nwm_forcing_coastal",
     "pre_nwm_forcing_coastal",
     "remove_nc_symlinks",
-    "run_sfincs_workflow",
     "run_workflow",
     "submit_workflow",
 ]

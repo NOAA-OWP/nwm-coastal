@@ -1,4 +1,4 @@
-"""SFINCS workflow stages including HydroMT data catalog generation."""
+"""HydroMT data catalog generation and NC symlink helpers for SFINCS."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 
 from coastal_calibration.config.schema import MeteoSource, PathConfig
-from coastal_calibration.stages.base import WorkflowStage
+from coastal_calibration.stages._hydromt_compat import apply_all_patches
+
+apply_all_patches()
 
 if TYPE_CHECKING:
     from coastal_calibration.config.schema import CoastalCalibConfig, SimulationConfig
@@ -250,8 +252,8 @@ NWM_METEO_RENAME = {
     "RAINRATE": "precip",
     "T2D": "temp",
     "Q2D": "humidity",
-    "U2D": "wind_u",
-    "V2D": "wind_v",
+    "U2D": "wind10_u",
+    "V2D": "wind10_v",
     "PSFC": "press_msl",
     "SWDOWN": "kin",
     "LWDOWN": "kout",
@@ -295,11 +297,17 @@ def _build_meteo_entry(
     CatalogEntry
         Catalog entry for meteo data.
     """
-    # URI is relative to the root (download_dir)
-    # Use .nc symlinks to work around HydroMT ext_override bug
+    # URI is relative to the root (download_dir).
+    # Both nwm_retro and nwm_ana downloads use YYYYMMDDHH.LDASIN_DOMAIN1
+    # naming (extension-less).  We create .nc symlinks to work around a
+    # HydroMT ext_override bug.
     uri = f"{PathConfig.METEO_SUBDIR}/{meteo_source}/*.LDASIN_DOMAIN1.nc"
 
     temporal_extent = _get_temporal_extent(sim)
+
+    # Both NWM Retrospective and Analysis LDASIN files use the same
+    # Lambert Conformal Conic (LCC) projected grid with coordinates in meters.
+    crs = "+proj=lcc +lat_0=40 +lon_0=-97 +lat_1=30 +lat_2=60 +x_0=0 +y_0=0 +R=6370000 +units=m +no_defs=True"
 
     # Determine source URL based on meteo source
     if meteo_source == "nwm_retro":
@@ -312,7 +320,7 @@ def _build_meteo_entry(
         source_version = "operational"
 
     metadata = CatalogMetadata(
-        crs=4326,
+        crs=crs,
         temporal_extent=temporal_extent,
         category="meteo",
         source_url=source_url,
@@ -327,10 +335,30 @@ def _build_meteo_entry(
         unit_add=NWM_METEO_UNIT_ADD,
     )
 
+    # NWM LDASIN files store projected (LCC) coordinates with floating-point
+    # rounding errors up to ~0.125 m.  hydromt's raster accessor rejects
+    # them as non-regular because its tolerance (atol=5e-4) is far too tight
+    # for metre-scale coordinates.  The custom ``round_coords`` preprocessor
+    # (registered in ``_hydromt_compat``) rounds x/y to the nearest integer,
+    # making the grid perfectly regular.
+    #
+    # Each LDASIN file also carries a scalar ``reference_time`` coordinate
+    # (model initialisation time).  When ``open_mfdataset`` concatenates
+    # the files, ``reference_time`` becomes a new dimension and inflates
+    # the data to 4-D (reference_time, time, y, x).  hydromt only supports
+    # 2-D/3-D arrays, so we drop it via ``drop_variables``.
+    driver: dict[str, Any] = {
+        "name": "raster_xarray",
+        "options": {
+            "preprocess": "round_coords",
+            "drop_variables": ["reference_time", "crs"],
+        },
+    }
+
     return CatalogEntry(
         name=f"{meteo_source}_meteo",
         data_type="RasterDataset",
-        driver="raster_xarray",
+        driver=driver,
         uri=uri,
         metadata=metadata,
         data_adapter=data_adapter,
@@ -438,10 +466,29 @@ def _build_coastal_stofs_entry(
         },
     )
 
+    # Use a dict driver to pass ``drop_variables``.  The STOFS netCDF
+    # (ADCIRC output) contains UGRID-like mesh topology variables
+    # (``adcirc_mesh``, ``element``) that cause xugrid to fail because
+    # ADCIRC uses 1-based face-node indexing while UGRID requires 0-based.
+    # We also drop the scalar ``nvel`` which clashes with the ``nvel``
+    # dimension.  Only the node coordinates (``x``, ``y``) and the water
+    # level variable (``zeta``/``cwl``) are needed.
+    driver: dict[str, Any] = {
+        "name": "geodataset_xarray",
+        "options": {
+            "drop_variables": [
+                "nvel",
+                "adcirc_mesh",
+                "element",
+                "mesh",
+            ],
+        },
+    }
+
     return CatalogEntry(
         name="stofs_waterlevel",
         data_type="GeoDataset",
-        driver="geodataset_xarray",
+        driver=driver,
         uri=uri,
         metadata=metadata,
         data_adapter=data_adapter,
@@ -491,59 +538,6 @@ def _build_coastal_glofs_entry(
 
     return CatalogEntry(
         name=f"glofs_{glofs_model}_waterlevel",
-        data_type="GeoDataset",
-        driver="geodataset_xarray",
-        uri=uri,
-        metadata=metadata,
-        data_adapter=data_adapter,
-        version=temporal_extent[0][:10],
-    )
-
-
-def _build_coastal_tpxo_entry(
-    tpxo_dir: Path,
-    sim: SimulationConfig,
-) -> CatalogEntry:
-    """Build catalog entry for TPXO tidal constituent data.
-
-    Parameters
-    ----------
-    tpxo_dir : Path
-        Path to TPXO data directory.
-    sim : SimulationConfig
-        Simulation configuration.
-
-    Returns
-    -------
-    CatalogEntry
-        Catalog entry for TPXO data.
-    """
-    # TPXO netCDF files contain tidal constituents
-    uri = str(tpxo_dir / "*.nc")
-
-    temporal_extent = _get_temporal_extent(sim)
-
-    metadata = CatalogMetadata(
-        crs=4326,
-        temporal_extent=temporal_extent,
-        category="ocean",
-        source_url="https://www.tpxo.net/global",
-        source_license="Licensed (requires TPXO registration)",
-        source_version="TPXO9",
-        notes="TPXO tidal constituent data for boundary conditions",
-    )
-
-    data_adapter = DataAdapter(
-        rename={
-            "ha": "tidal_amplitude",
-            "hp": "tidal_phase",
-            "hRe": "tidal_real",
-            "hIm": "tidal_imag",
-        },
-    )
-
-    return CatalogEntry(
-        name="tpxo_tidal",
         data_type="GeoDataset",
         driver="geodataset_xarray",
         uri=uri,
@@ -628,7 +622,9 @@ def generate_data_catalog(
         elif effective_coastal_source == "glofs":
             coastal_entry = _build_coastal_glofs_entry(sim, glofs_model)
         elif effective_coastal_source == "tpxo":
-            coastal_entry = _build_coastal_tpxo_entry(config.paths.otps_dir, sim)
+            # TPXO forcing is handled directly by SfincsForcingStage
+            # using predict_tide, not via the HydroMT data catalog.
+            coastal_entry = None
         else:
             coastal_entry = None
 
@@ -639,45 +635,6 @@ def generate_data_catalog(
         catalog.to_yaml(output_path)
 
     return catalog
-
-
-class SFINCSDataCatalogStage(WorkflowStage):
-    """Generate HydroMT data catalog for SFINCS model setup."""
-
-    name = "sfincs_data_catalog"
-    description = "Generate HydroMT data catalog for SFINCS"
-
-    def run(self) -> dict[str, Any]:
-        """Execute data catalog generation."""
-        self._update_substep("Generating data catalog")
-
-        cfg = self.config
-        output_dir = cfg.paths.work_dir
-        catalog_path = output_dir / "data_catalog.yml"
-
-        catalog = generate_data_catalog(
-            cfg,
-            output_path=catalog_path,
-            catalog_name=f"coastal_calibration_{cfg.simulation.coastal_domain}",
-        )
-
-        self._update_substep("Data catalog generated")
-
-        return {
-            "catalog_path": str(catalog_path),
-            "entries": [entry.name for entry in catalog.entries],
-            "status": "completed",
-        }
-
-    def validate(self) -> list[str]:
-        """Validate that required data exists."""
-        errors = super().validate()
-
-        download_dir = self.config.paths.download_dir
-        if not download_dir.exists():
-            errors.append(f"Download directory does not exist: {download_dir}")
-
-        return errors
 
 
 def create_nc_symlinks(
@@ -729,6 +686,9 @@ def create_nc_symlinks(
 
     if include_meteo:
         meteo_dir = download_dir / PathConfig.METEO_SUBDIR / meteo_source
+        # Both nwm_retro and nwm_ana downloads use extension-less
+        # YYYYMMDDHH.LDASIN_DOMAIN1 naming.  We create .nc symlinks to
+        # work around a HydroMT ext_override bug.
         if meteo_dir.exists():
             for src in meteo_dir.glob("*.LDASIN_DOMAIN1"):
                 dst = src.with_suffix(".LDASIN_DOMAIN1.nc")
@@ -783,6 +743,8 @@ def remove_nc_symlinks(
 
     if include_meteo:
         meteo_dir = download_dir / PathConfig.METEO_SUBDIR / meteo_source
+        # Both sources use extension-less LDASIN_DOMAIN1 naming; remove
+        # the .nc symlinks we created as a HydroMT workaround.
         if meteo_dir.exists():
             for link in meteo_dir.glob("*.LDASIN_DOMAIN1.nc"):
                 if link.is_symlink():

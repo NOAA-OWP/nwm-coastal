@@ -43,9 +43,10 @@ config = CoastalCalibConfig.from_yaml("config.yaml")
 print(config.slurm.job_name)
 print(config.simulation.coastal_domain)
 print(config.paths.work_dir)
+print(config.model)  # "schism" or "sfincs"
 ```
 
-### Creating Configuration Programmatically
+### Creating SCHISM Configuration Programmatically
 
 ```python
 from datetime import datetime
@@ -56,43 +57,120 @@ from coastal_calibration import (
     SimulationConfig,
     BoundaryConfig,
     PathConfig,
-    MPIConfig,
+    SchismModelConfig,
     MonitoringConfig,
     DownloadConfig,
 )
 
-# Create configuration components
-slurm = SlurmConfig(
-    job_name="my_simulation",
-    user="your_username",
-    nodes=2,
-    ntasks_per_node=18,
-)
-
-simulation = SimulationConfig(
-    start_date=datetime(2021, 6, 11),
-    duration_hours=24,
-    coastal_domain="hawaii",
-    meteo_source="nwm_ana",
-)
-
-boundary = BoundaryConfig(source="stofs")
-
-paths = PathConfig(
-    work_dir=Path("/ngen-test/coastal/your_username/my_run"),
-    raw_download_dir=Path("/ngen-test/coastal/your_username/downloads"),
-)
-
-# Combine into full configuration
 config = CoastalCalibConfig(
-    slurm=slurm,
-    simulation=simulation,
-    boundary=boundary,
-    paths=paths,
+    slurm=SlurmConfig(
+        job_name="my_simulation",
+    ),
+    simulation=SimulationConfig(
+        start_date=datetime(2021, 6, 11),
+        duration_hours=24,
+        coastal_domain="hawaii",
+        meteo_source="nwm_ana",
+    ),
+    boundary=BoundaryConfig(source="stofs"),
+    paths=PathConfig(
+        work_dir=Path("/ngen-test/coastal/your_username/my_run"),
+        raw_download_dir=Path("/ngen-test/coastal/your_username/downloads"),
+    ),
+    model_config=SchismModelConfig(
+        nodes=2,
+        ntasks_per_node=18,
+    ),
 )
 
 # Save to YAML
 config.to_yaml("generated_config.yaml")
+```
+
+### Enabling NOAA Observation Station Comparison
+
+To automatically discover NOAA CO-OPS water level stations within the model domain and
+generate comparison plots after the SCHISM run, set `include_noaa_gages=True` in the
+model configuration:
+
+```python
+config = CoastalCalibConfig(
+    slurm=SlurmConfig(
+        job_name="hawaii_with_obs",
+    ),
+    simulation=SimulationConfig(
+        start_date=datetime(2021, 6, 11),
+        duration_hours=24,
+        coastal_domain="hawaii",
+        meteo_source="nwm_ana",
+    ),
+    boundary=BoundaryConfig(source="stofs"),
+    paths=PathConfig(
+        work_dir=Path("/ngen-test/coastal/your_username/hawaii_obs"),
+        raw_download_dir=Path("/ngen-test/coastal/your_username/downloads"),
+    ),
+    model_config=SchismModelConfig(
+        nodes=2,
+        ntasks_per_node=18,
+        include_noaa_gages=True,  # Enable station discovery & comparison plots
+    ),
+)
+```
+
+This activates two additional stages in the pipeline:
+
+- **`schism_obs`** discovers NOAA CO-OPS stations via the concave hull of the open
+    boundary nodes and writes `station.in` and `station_noaa_ids.txt`.
+- **`schism_plot`** reads SCHISM station output (`staout_1`), fetches observations from
+    the CO-OPS API (with MLLW→MSL datum conversion), and saves comparison plots to
+    `figs/`.
+
+### Creating SFINCS Configuration Programmatically
+
+```python
+from datetime import datetime
+from pathlib import Path
+from coastal_calibration import (
+    CoastalCalibConfig,
+    SlurmConfig,
+    SimulationConfig,
+    BoundaryConfig,
+    PathConfig,
+    SfincsModelConfig,
+)
+
+TEXAS_DIR = Path("/path/to/texas/model")
+
+config = CoastalCalibConfig(
+    slurm=SlurmConfig(),
+    simulation=SimulationConfig(
+        start_date=datetime(2025, 6, 1),
+        duration_hours=168,
+        coastal_domain="atlgulf",
+        meteo_source="nwm_ana",
+    ),
+    boundary=BoundaryConfig(source="stofs"),
+    paths=PathConfig(
+        work_dir=Path("/tmp/sfincs_run"),
+        raw_download_dir=Path("/tmp/sfincs_downloads"),
+    ),
+    model_config=SfincsModelConfig(
+        prebuilt_dir=TEXAS_DIR,
+        discharge_locations_file=TEXAS_DIR / "sfincs_nwm.src",
+        observation_points=[
+            {"x": 830344.95, "y": 3187383.41, "name": "Sargent"},
+        ],
+        merge_observations=False,
+        merge_discharge=False,
+        include_noaa_gages=True,
+        include_precip=True,
+        include_wind=True,
+        include_pressure=True,
+        forcing_to_mesh_offset_m=0.0,  # STOFS already in mesh datum
+        vdatum_mesh_to_msl_m=0.171,  # mesh datum (NAVD88) → MSL for obs comparison
+        meteo_res=2000,  # meteo output resolution in metres (auto-derived if None)
+    ),
+)
 ```
 
 ### Configuration Validation
@@ -115,6 +193,10 @@ else:
 
 ### Submit to SLURM
 
+Both `run()` and `submit()` execute the same stage pipeline. `submit()` automatically
+partitions stages: Python-only stages run on the login node, while container stages are
+bundled into a SLURM job.
+
 ```python
 from coastal_calibration import CoastalCalibConfig, CoastalCalibRunner
 
@@ -129,6 +211,10 @@ print(f"Job {result.job_id} submitted")
 result = runner.submit(wait=True)
 if result.success:
     print(f"Job completed in {result.duration_seconds:.1f}s")
+
+# Submit partial pipeline
+result = runner.submit(wait=True, start_from="boundary_conditions")
+result = runner.submit(wait=True, stop_after="post_forcing")
 ```
 
 ### Run Directly

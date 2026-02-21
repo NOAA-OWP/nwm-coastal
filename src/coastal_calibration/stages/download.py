@@ -10,10 +10,19 @@ from coastal_calibration.stages.base import WorkflowStage
 
 
 class DownloadStage(WorkflowStage):
-    """Download required input data for SCHISM simulation."""
+    """Download required input data."""
 
     name = "download"
-    description = "Download input data (NWM, STOFS)"
+
+    @property  # type: ignore[override]
+    def description(self) -> str:  # type: ignore[override]
+        """Build description from the actual configured data sources."""
+        sources = ["NWM"]
+        try:
+            sources.append(self.config.boundary.source.upper())
+        except Exception:
+            sources.append("coastal")
+        return f"Download input data ({', '.join(sources)})"
 
     def run(self) -> dict[str, Any]:
         """Execute data download."""
@@ -46,7 +55,6 @@ class DownloadStage(WorkflowStage):
             tpxo_local_path=tpxo_data_path,
             timeout=download_cfg.timeout,
             raise_on_error=download_cfg.raise_on_error,
-            skip_existing=download_cfg.skip_existing,
         )
 
         # Track STOFS file path in result instead of mutating config
@@ -61,6 +69,8 @@ class DownloadStage(WorkflowStage):
 
         if errors and download_cfg.raise_on_error:
             raise RuntimeError(f"Download failed: {'; '.join(errors)}")
+
+        self._log(f"Download complete — raw files stored in {output_dir}")
 
         return {
             "output_dir": str(output_dir),

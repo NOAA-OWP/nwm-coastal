@@ -1,10 +1,10 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
-set -x
+set -ex
 
-source ./initial_discharge.bash
-source ./combine_sink_source.bash
-source ./merge_source_sink.bash
+source "$SCRIPTS_DIR/initial_discharge.bash"
+source "$SCRIPTS_DIR/combine_sink_source.bash"
+source "$SCRIPTS_DIR/merge_source_sink.bash"
 
 #--------------------------------------------------------------
 #
@@ -30,7 +30,7 @@ pre_nwm_coastal() {
 
    nwm_coastal_merge_source_sink "" "forecast" "forecast"
 
-   export NSCRIBES=2
+   export NSCRIBES=${NSCRIBES:-2}
 
    #create offline partition
    create_offline_partition $NPROCS "${NSCRIBES}"

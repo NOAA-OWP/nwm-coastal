@@ -1,6 +1,6 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
-set -x
+set -ex
 
 make_tpxo_ocean() {
    #
@@ -23,12 +23,12 @@ make_tpxo_ocean() {
 
    # END_DATETIME is precomputed by the Python package
    python $TPXO_SCRIPTS_DIR/make_otps_input.py \
-	  $SCHISM_PARM_DIR/prvi/open_bnds_hgrid.nc \
+	  $SCHISM_PARM_DIR/$COASTAL_DOMAIN/open_bnds_hgrid.nc \
 	  $PDY$cyc $END_DATETIME $TIME_STEP_IN_SECS  \
 	  $DATAexec/otps_lat_lon_time.txt
 
-   cp ./setup_tpxo.txt $DATAexec/
-   cp ./Model_tpxo10_atlas $DATAexec/
+   cp "$SCRIPTS_DIR/setup_tpxo.txt" $DATAexec/
+   cp "$SCRIPTS_DIR/Model_tpxo10_atlas" $DATAexec/
 
    cd $DATAexec
 

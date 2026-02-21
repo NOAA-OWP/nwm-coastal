@@ -14,6 +14,7 @@ This page provides detailed documentation for the NWM Coastal Python API.
         - to_yaml
         - to_dict
         - validate
+        - model
 
 ### SlurmConfig
 
@@ -31,9 +32,17 @@ This page provides detailed documentation for the NWM Coastal Python API.
 
 ::: coastal_calibration.config.schema.PathConfig
 
-### MPIConfig
+### ModelConfig
 
-::: coastal_calibration.config.schema.MPIConfig
+::: coastal_calibration.config.schema.ModelConfig
+
+### SchismModelConfig
+
+::: coastal_calibration.config.schema.SchismModelConfig
+
+### SfincsModelConfig
+
+::: coastal_calibration.config.schema.SfincsModelConfig
 
 ### MonitoringConfig
 
@@ -65,9 +74,34 @@ This page provides detailed documentation for the NWM Coastal Python API.
 
 ::: coastal_calibration.downloader.validate_date_ranges
 
+## NOAA CO-OPS API
+
+### COOPSAPIClient
+
+::: coastal_calibration.coops_api.COOPSAPIClient
+    options:
+      show_source: true
+      members:
+        - stations_metadata
+        - validate_parameters
+        - build_url
+        - fetch_data
+        - get_datums
+
+### query_coops_byids
+
+::: coastal_calibration.coops_api.query_coops_byids
+
+### query_coops_bygeometry
+
+::: coastal_calibration.coops_api.query_coops_bygeometry
+
 ## Type Aliases
 
 ```python
+# Model type
+ModelType = Literal["schism", "sfincs"]
+
 # Meteorological data source
 MeteoSource = Literal["nwm_retro", "nwm_ana"]
 
@@ -88,13 +122,11 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 ```python
 DEFAULT_SING_IMAGE_PATH = Path("/ngencerf-app/singularity/ngen-coastal.sif")
 DEFAULT_PARM_DIR = Path("/ngen-test/coastal/ngwpc-coastal")
-DEFAULT_NGEN_APP_DIR = Path("/ngen-app")
 DEFAULT_NFS_MOUNT = Path("/ngen-test")
 DEFAULT_CONDA_ENV_NAME = "ngen_forcing_coastal"
-DEFAULT_NWM_VERSION = "v3.0.6"
+DEFAULT_NWM_DIR = Path("/ngen-app/nwm.v3.0.6")
 DEFAULT_OTPS_DIR = Path("/ngen-app/OTPSnc")
 DEFAULT_SLURM_PARTITION = "c5n-18xlarge"
-DEFAULT_SCHISM_BINARY = "pschism_wcoss2_NO_PARMETIS_TVD-VL.openmpi"
 ```
 
 ### Default Path Templates
@@ -102,13 +134,22 @@ DEFAULT_SCHISM_BINARY = "pschism_wcoss2_NO_PARMETIS_TVD-VL.openmpi"
 ```python
 DEFAULT_WORK_DIR_TEMPLATE = (
     "/ngen-test/coastal/${slurm.user}/"
-    "schism_${simulation.coastal_domain}_${boundary.source}_${simulation.meteo_source}/"
-    "schism_${simulation.start_date}"
+    "${model}_${simulation.coastal_domain}_${boundary.source}_${simulation.meteo_source}/"
+    "${model}_${simulation.start_date}"
 )
 
 DEFAULT_RAW_DOWNLOAD_DIR_TEMPLATE = (
     "/ngen-test/coastal/${slurm.user}/"
-    "schism_${simulation.coastal_domain}_${boundary.source}_${simulation.meteo_source}/"
+    "${model}_${simulation.coastal_domain}_${boundary.source}_${simulation.meteo_source}/"
     "raw_data"
 )
+```
+
+### Model Registry
+
+```python
+MODEL_REGISTRY: dict[str, type[ModelConfig]] = {
+    "schism": SchismModelConfig,
+    "sfincs": SfincsModelConfig,
+}
 ```

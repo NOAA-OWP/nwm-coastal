@@ -16,7 +16,6 @@ from coastal_calibration.downloader import (
     _build_nwm_retro_forcing_urls,
     _build_nwm_retro_streamflow_urls,
     _build_stofs_urls,
-    _filter_existing,
     get_date_range,
     get_default_sources,
     get_overlapping_range,
@@ -85,7 +84,7 @@ class TestGetDateRange:
     def test_retro_hawaii(self):
         dr = get_date_range("nwm_retro", "hawaii")
         assert dr is not None
-        assert dr.start == datetime(1994, 1, 1)
+        assert dr.start == datetime(1994, 1, 2)
 
     def test_retro_atlgulf_maps_to_conus(self):
         dr = get_date_range("nwm_retro", "atlgulf")
@@ -282,16 +281,20 @@ class TestBuildUrls:
     def test_ana_forcing_urls(self, tmp_path):
         start = datetime(2023, 1, 1, 0)
         end = datetime(2023, 1, 1, 2)
-        urls, _paths = _build_nwm_ana_forcing_urls(start, end, tmp_path, "conus")
+        urls, paths = _build_nwm_ana_forcing_urls(start, end, tmp_path, "conus")
         assert len(urls) == 2
         assert "storage.googleapis.com" in urls[0]
         assert "analysis_assim" in urls[0]
+        # Local paths use YYYYMMDDHH.LDASIN_DOMAIN1 naming (same as nwm_retro)
+        assert paths[0].name == "2023010100.LDASIN_DOMAIN1"
+        assert paths[1].name == "2023010101.LDASIN_DOMAIN1"
 
     def test_ana_forcing_urls_hawaii(self, tmp_path):
         start = datetime(2023, 1, 1, 0)
         end = datetime(2023, 1, 1, 1)
-        urls, _paths = _build_nwm_ana_forcing_urls(start, end, tmp_path, "hawaii")
+        urls, paths = _build_nwm_ana_forcing_urls(start, end, tmp_path, "hawaii")
         assert "hawaii" in urls[0]
+        assert paths[0].name == "2023010100.LDASIN_DOMAIN1"
 
     def test_ana_streamflow_urls_conus(self, tmp_path):
         start = datetime(2023, 1, 1, 0)
@@ -355,7 +358,7 @@ class TestBuildUrls:
         assert "t12z" in urls[0]
 
     def test_stofs_path_includes_date(self, tmp_path):
-        """Different dates produce different local paths to avoid skip_existing collisions."""
+        """Different dates produce different local paths."""
         _, paths_a = _build_stofs_urls(datetime(2022, 6, 1, 0), tmp_path)
         _, paths_b = _build_stofs_urls(datetime(2022, 7, 1, 0), tmp_path)
         assert paths_a[0] != paths_b[0]
@@ -373,34 +376,6 @@ class TestBuildUrls:
         end = datetime(2023, 1, 1, 1)
         urls, _paths = _build_glofs_urls(start, end, tmp_path, "lmhofs")
         assert "lake-michigan-huron" in urls[0]
-
-
-class TestFilterExisting:
-    def test_no_existing(self, tmp_path):
-        urls = ["http://a", "http://b"]
-        paths = [tmp_path / "a.nc", tmp_path / "b.nc"]
-        pending_urls, _pending_paths, existing = _filter_existing(urls, paths)
-        assert len(pending_urls) == 2
-        assert existing == 0
-
-    def test_some_existing(self, tmp_path):
-        urls = ["http://a", "http://b"]
-        f = tmp_path / "a.nc"
-        f.write_text("data")
-        paths = [f, tmp_path / "b.nc"]
-        pending_urls, _pending_paths, existing = _filter_existing(urls, paths)
-        assert len(pending_urls) == 1
-        assert existing == 1
-        assert pending_urls[0] == "http://b"
-
-    def test_empty_file_not_counted(self, tmp_path):
-        urls = ["http://a"]
-        f = tmp_path / "a.nc"
-        f.write_text("")
-        paths = [f]
-        pending_urls, _pending_paths, existing = _filter_existing(urls, paths)
-        assert len(pending_urls) == 1
-        assert existing == 0
 
 
 class TestValidateDateRanges:
